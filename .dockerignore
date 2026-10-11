@@ -1,0 +1,40 @@
+# Git & version control
+.git
+.gitignore
+
+# Environment variables & secrets (NEVER include in images)
+.env
+.env.*
+*.env
+
+# Python virtual environments & packages
+.venv/
+venv/
+env/
+ENV/
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.cache/
+
+# Observability, logs & temp files
+.logfire/
+*.log
+tmp/
+scratch/
+
+# Testing & development
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local raw datasets (ingested in Qdrant cloud, not needed in web image)
+DATA/
+processed_data/
+
+# OS specific files
+.DS_Store
+Thumbs.db
