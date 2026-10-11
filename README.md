@@ -57,7 +57,42 @@ flowchart TD
 
 ---
 
-### 2. Evaluation Suite Architecture (LLM-as-a-Judge)
+### 2. Multi-Format Data Ingestion & Vector Indexing Pipeline
+
+Before the RAG system can answer queries, raw documents in `DATA/` are parsed, chunked, vectorized, and indexed into **Qdrant Cloud**:
+
+```mermaid
+flowchart TD
+    subgraph Data Sources [📁 Raw Documents in DATA/]
+        TrueData[📘 DATA/true_data/<br/>Kubernetes Architecture, Pods Autoscale,<br/>Job Management, CronJobs, Work Queues<br/>.pdf, .docx, .pptx, .html, .txt]
+        NoisyData[📑 DATA/noisy_data/<br/>OS Kernels, C++ Exception Handling,<br/>Networking RFCs - Distractor Noise]
+    end
+
+    subgraph Ingestion Engine [⚙️ app/ingestion/processor.py]
+        Loader[📄 Document Loaders<br/>pdf.py · office.py · html.py · text.py]
+        Splitter[✂️ Paragraph-Aware Chunker<br/>splitter.py: 1500 chars semantic boundaries]
+        LocalCache[(💾 processed_data/<br/>Local JSON chunk metadata cache)]
+        Embedder[🧬 Gemini Embedding Service<br/>3072-dim dense vectors]
+    end
+
+    subgraph Qdrant Cluster [☁️ Qdrant Cloud Vector Database]
+        ColCheck{Collection Exists?<br/>enterprise_rag}
+        CreateCol[🔨 Create Collection<br/>3072 dims · Cosine Metric]
+        UpsertBatch[📦 Batch Upsert Points<br/>vector + payload: text, source, source_type]
+    end
+
+    TrueData & NoisyData --> Loader
+    Loader --> Splitter
+    Splitter --> LocalCache
+    Splitter --> Embedder
+    Embedder --> ColCheck
+    ColCheck -- No --> CreateCol --> UpsertBatch
+    ColCheck -- Yes --> UpsertBatch
+```
+
+---
+
+### 3. Evaluation Suite Architecture (LLM-as-a-Judge)
 
 KubeMind includes an independent **Streamlit Evaluation Dashboard** (`evals/app.py`) powered by **RAGAS** and **OpenAI `gpt-4o-mini`**:
 
@@ -87,6 +122,7 @@ flowchart LR
 
 | Decision | What We Built | Why This Matters in Enterprise Production |
 | :--- | :--- | :--- |
+| **Multi-Format Ingestion** | Native loaders for PDF, DOCX, PPTX, HTML, and TXT | Enterprise documentation is scattered across slide decks, SOP word files, and web docs. The pipeline unifies them into a single schema. |
 | **Pre-Retrieval Guardrails** | **NVIDIA NeMo Guardrails** with Colang rules | Blocks adversarial prompts (jailbreaks) and off-topic queries in **<1 second** before any database search, saving up to 80% in compute and token costs. |
 | **Resilient LLM Gateway** | **Portkey Gateway** (`pc-enterp-f26518`) with automated fallback (`@rag_8h` $\rightarrow$ `@rag1-8h`) | Production systems cannot crash due to vendor rate limits (`429`) or outages (`503`). Portkey automatically retries and routes requests to a secondary key without downtime. |
 | **Two-Stage Retrieval** | **Qdrant Cloud** (top-15) + **FlashRank Cross-Encoder** (top-5) | Dense vector search (cosine similarity) is mathematically fuzzy. FlashRank rescores candidate passages using a quantized Cross-Encoder ONNX model locally in <0.15s for high precision. |
@@ -100,38 +136,54 @@ flowchart LR
 
 ```text
 k8s-enterprise-agentic-rag/
+├── DATA/                                  # Raw enterprise multi-format documents
+│   ├── true_data/                         # Ground truth K8s docs (.pptx, .docx, .html, .txt)
+│   └── noisy_data/                        # Distractor technical papers & RFCs for noise benchmarks
+├── processed_data/                        # Cached JSON chunk metadata & payloads
+│   ├── true/
+│   └── noisy/
 ├── app/
 │   ├── agents/
-│   │   ├── graph.py               # LangGraph cyclic state machine definition
-│   │   ├── state.py               # AgentState schema (messages, docs, plan)
+│   │   ├── graph.py                       # LangGraph cyclic state machine definition
+│   │   ├── state.py                       # AgentState schema (messages, docs, plan)
 │   │   └── nodes/
-│   │       ├── planner.py         # Intent classification & query refinement
-│   │       ├── retriever.py       # Qdrant search + FlashRank reranking coordinator
-│   │       └── responder.py       # Grounded technical response generation
+│   │       ├── planner.py                 # Intent classification & query refinement
+│   │       ├── retriever.py               # Qdrant search + FlashRank reranking coordinator
+│   │       └── responder.py               # Grounded technical response generation
 │   ├── gateway/
-│   │   └── client.py              # Portkey client, slug routing, fallback targets
+│   │   └── client.py                      # Portkey client, slug routing, fallback targets
 │   ├── guardrails/
-│   │   ├── colang_rules.py        # Colang flows for jailbreak & off-topic policies
-│   │   └── rails.py               # NeMo LLMRails gatekeeper singleton
+│   │   ├── colang_rules.py                # Colang flows for jailbreak & off-topic policies
+│   │   └── rails.py                       # NeMo LLMRails gatekeeper singleton
+│   ├── ingestion/                         # Universal document ingestion engine
+│   │   ├── chunking/
+│   │   │   └── splitter.py                # Paragraph-aware semantic text chunker (1500 chars)
+│   │   ├── loaders/                       # Format-specific document parsers
+│   │   │   ├── pdf.py                     # PDF text extractor (pypdf / PyMuPDF)
+│   │   │   ├── office.py                  # DOCX & PPTX extractors (python-docx, python-pptx)
+│   │   │   ├── html.py                    # HTML parser (BeautifulSoup4)
+│   │   │   └── text.py                    # Plain text loader
+│   │   └── processor.py                   # Main ingestion runner (parse → chunk → embed → Qdrant)
 │   ├── services/
 │   │   └── retrieval/
-│   │       ├── qdrant_service.py  # Qdrant Cloud client & vector query logic
-│   │       └── ranking_service.py # FlashRank Cross-Encoder ONNX reranker
-│   ├── config.py                  # Pydantic environment configuration
-│   └── main.py                    # FastAPI application, routes, and Logfire setup
+│   │       ├── embeddings.py              # Gemini 3072-dim dense embedding service
+│   │       ├── qdrant_service.py          # Qdrant Cloud client & vector query logic
+│   │       └── ranking_service.py         # FlashRank Cross-Encoder ONNX reranker
+│   ├── config.py                          # Pydantic environment configuration
+│   └── main.py                            # FastAPI application, routes, and Logfire setup
 ├── evals/
-│   ├── app.py                     # Streamlit Evaluation Suite UI
-│   ├── golden_dataset.json        # Ground truth questions, contexts, and answers
-│   ├── guardrails_eval.py         # Binary confusion matrix (TP/TN/FP/FN) evaluator
-│   ├── metrics.py                 # RAGAS 6-experiment evaluation execution engine
-│   └── pipeline.py                # Live pipeline runner against running FastAPI backend
+│   ├── app.py                             # Streamlit Evaluation Suite UI
+│   ├── golden_dataset.json                # Ground truth questions, contexts, and answers
+│   ├── guardrails_eval.py                 # Binary confusion matrix (TP/TN/FP/FN) evaluator
+│   ├── metrics.py                         # RAGAS 6-experiment evaluation execution engine
+│   └── pipeline.py                        # Live pipeline runner against running FastAPI backend
 ├── ui/
-│   └── app.py                     # Streamlit Chatbot UI for end users
-├── Dockerfile                     # Production-hardened container specification
-├── .dockerignore                  # Docker build exclusion rules
-├── .gitignore                     # Git exclusion rules
-├── .env.example                   # Environment variable template
-└── requirements.txt               # Pinned Python package dependencies
+│   └── app.py                             # Streamlit Chatbot UI for end users
+├── Dockerfile                             # Production-hardened container specification
+├── .dockerignore                          # Docker build exclusion rules
+├── .gitignore                             # Git exclusion rules
+├── .env.example                           # Environment variable template
+└── requirements.txt                       # Pinned Python package dependencies
 ```
 
 ---
@@ -212,7 +264,43 @@ LOGFIRE_TOKEN=your_logfire_token
 
 ---
 
-### 4. Running the Application
+### 4. Ingest Documents into Qdrant Cloud (Mandatory First Step)
+
+> [!IMPORTANT]
+> **You must run ingestion before starting the backend or running evaluations.**  
+> The repository includes raw Kubernetes architecture docs and noise benchmarks under `DATA/`. The ingestion engine parses these files, breaks them into 1500-character semantic chunks, generates 3072-dimensional vector embeddings with Google Gemini, and uploads them with source metadata to your Qdrant Cloud cluster.
+
+Run the ingestion processor across the dataset:
+
+```bash
+# Ingest all documents from DATA/ (auto-detects true_data and noisy_data subdirectories):
+python -m app.ingestion.processor DATA
+```
+
+#### Ingestion Options & Flags:
+
+* **Clean Fresh Ingestion (`--wipe`)**:  
+  Drops the existing Qdrant collection, recreates it with 3072-dim Cosine metrics, and re-indexes all documents:
+  ```bash
+  python -m app.ingestion.processor DATA --wipe
+  ```
+
+* **Ingest Only Kubernetes Ground Truth Data**:
+  ```bash
+  python -m app.ingestion.processor DATA/true_data true
+  ```
+
+* **Ingest Only Distractor Noise Data**:
+  ```bash
+  python -m app.ingestion.processor DATA/noisy_data noisy
+  ```
+
+Once ingestion completes, you will see confirmation logs in your terminal and Logfire:  
+`✅ Generated chunks → Vectorizing & Indexing → Indexed points to Qdrant → Ingestion job completed.`
+
+---
+
+### 5. Running the Application
 
 Open separate terminal windows for the backend and user interfaces:
 
