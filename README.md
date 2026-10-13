@@ -1,3 +1,13 @@
+---
+title: KubeMind Enterprise Agentic RAG
+emoji: ☸️
+colorFrom: blue
+colorTo: indigo
+sdk: gradio
+app_file: app.py
+pinned: false
+---
+
 # ☸️ KubeMind: Enterprise Agentic RAG & Copilot for Kubernetes
 
 [![Python Version](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
